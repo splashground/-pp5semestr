@@ -30,11 +30,13 @@ public:
 
 private:
     struct LoadedPlugin {
-        void* handle;
+        void* handle = nullptr;
         std::string name;
-        MathFunction function;
+        MathFunction function = nullptr;
     };
-
+	void loadSinglePlugin(
+        const std::filesystem::path& filePath
+    );
     std::vector<LoadedPlugin> plugins_;
     std::unordered_map<std::string, MathFunction> functions_;
 };

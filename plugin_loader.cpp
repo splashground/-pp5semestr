@@ -1,4 +1,3 @@
-
 #include "plugin_loader.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -13,15 +12,15 @@ namespace fs = std::filesystem;
 
 namespace {
 
-    std::string windowsError(DWORD code) {
-        return "Windows error code: " + std::to_string(code);
-    }
+std::string windowsError(DWORD code) {
+    return "Windows error code: " + std::to_string(code);
+}
 
-    void closeLibrary(void* handle) {
-        if (handle) {
-            FreeLibrary(reinterpret_cast<HMODULE>(handle));
-        }
+void closeLibrary(void* handle) {
+    if (handle) {
+        FreeLibrary(reinterpret_cast<HMODULE>(handle));
     }
+}
 
 } // namespace
 
@@ -29,11 +28,12 @@ PluginLoader::~PluginLoader() {
     functions_.clear();
 
     for (auto it = plugins_.rbegin();
-        it != plugins_.rend(); ++it) {
+         it != plugins_.rend(); ++it) {
         closeLibrary(it->handle);
     }
 }
 
+// check folder plugins
 void PluginLoader::loadFromDirectory(
     const fs::path& directory
 ) {
@@ -41,7 +41,7 @@ void PluginLoader::loadFromDirectory(
 
     if (!fs::is_directory(directory, ec) || ec) {
         std::cerr << "Warning: plugin directory not found: "
-            << directory.string() << '\n';
+                  << directory.string() << '\n';
         return;
     }
 
@@ -50,14 +50,14 @@ void PluginLoader::loadFromDirectory(
 
     if (ec) {
         std::cerr << "Cannot scan plugin directory: "
-            << ec.message() << '\n';
+                  << ec.message() << '\n';
         return;
     }
 
     for (; it != end; it.increment(ec)) {
         if (ec) {
             std::cerr << "Directory scan error: "
-                << ec.message() << '\n';
+                      << ec.message() << '\n';
             ec.clear();
             continue;
         }
@@ -70,113 +70,117 @@ void PluginLoader::loadFromDirectory(
             continue;
         }
 
-        std::wstring extension = entry.path().extension().wstring();
+        const std::wstring extension =
+            entry.path().extension().wstring();
 
         if (extension != L".dll" && extension != L".DLL") {
             continue;
         }
 
-        SetLastError(ERROR_SUCCESS);
+        loadSinglePlugin(entry.path());
+    }
+}
 
-        HMODULE module = LoadLibraryW(entry.path().c_str());
+// reg one DLL
+void PluginLoader::loadSinglePlugin(
+    const fs::path& filePath
+) {
+    SetLastError(ERROR_SUCCESS);
 
-        if (!module) {
-            DWORD errorCode = GetLastError();
+    HMODULE module = LoadLibraryW(filePath.c_str());
 
-            std::cerr << "Cannot load "
-                << entry.path().filename().string()
-                << ": " << windowsError(errorCode) << '\n';
-            continue;
-        }
+    if (!module) {
+        const DWORD errorCode = GetLastError();
 
-        auto getInfo = reinterpret_cast<GetPluginInfo>(
-            GetProcAddress(module, "get_plugin_info")
-            );
+        std::cerr << "Cannot load "
+                  << filePath.filename().string()
+                  << ": " << windowsError(errorCode) << '\n';
+        return;
+    }
 
-        if (!getInfo) {
-            std::cerr << "Invalid plugin: "
-                << entry.path().filename().string()
-                << " (missing get_plugin_info)\n";
+    auto getInfo = reinterpret_cast<GetPluginInfo>(
+        GetProcAddress(module, "get_plugin_info")
+    );
+
+    if (!getInfo) {
+        std::cerr << "Invalid plugin: "
+                  << filePath.filename().string()
+                  << " (missing get_plugin_info)\n";
+
+        FreeLibrary(module);
+        return;
+    }
+
+    bool registered = false;
+
+    try {
+        const PluginInfo* info = getInfo();
+
+        if (!info || !info->name ||
+            !info->function || info->name[0] == '\0') {
+
+            std::cerr << "Invalid plugin metadata: "
+                      << filePath.filename().string()
+                      << '\n';
 
             FreeLibrary(module);
-            continue;
+            return;
         }
 
-        bool registered = false;
+        const std::string name(info->name);
+
+        if (functions_.count(name)) {
+            std::cerr << "Duplicate function name: "
+                      << name << ". Plugin skipped.\n";
+
+            FreeLibrary(module);
+            return;
+        }
+
+        // savin
+        plugins_.push_back({
+            reinterpret_cast<void*>(module),
+            name,
+            info->function
+        });
 
         try {
-            const PluginInfo* info = getInfo();
-
-            if (!info || !info->name ||
-                !info->function || info->name[0] == '\0') {
-                std::cerr << "Invalid plugin metadata: "
-                    << entry.path().filename().string()
-                    << '\n';
-
-                FreeLibrary(module);
-                continue;
-            }
-
-            std::string name(info->name);
-
-            if (functions_.count(name)) {
-                std::cerr << "Duplicate function name: "
-                    << name << ". Plugin skipped.\n";
-
-                FreeLibrary(module);
-                continue;
-            }
-
-            // Сначала сохраняем дескриптор библиотеки.
-            // Если выделение памяти завершится исключением,
-            // библиотека будет закрыта в обработчике ниже.
-            plugins_.push_back({
-                reinterpret_cast<void*>(module),
+            auto result = functions_.emplace(
                 name,
                 info->function
-                });
+            );
 
-            try {
-                auto result = functions_.emplace(
-                    name, info->function
-                );
-
-                if (!result.second) {
-                    plugins_.pop_back();
-                    FreeLibrary(module);
-                    continue;
-                }
-
-                registered = true;
-            }
-            catch (...) {
+            if (!result.second) {
                 plugins_.pop_back();
-                throw;
-            }
-
-            std::cout << "Loaded function: "
-                << name << '\n';
-
-        }
-        catch (const std::exception& e) {
-            if (!registered) {
-                // Если дескриптор уже записан в plugins_,
-                // его удалили из вектора в блоке выше.
                 FreeLibrary(module);
+                return;
             }
 
-            std::cerr << "Plugin initialization failed: "
-                << e.what() << '\n';
-
+            registered = true;
         }
         catch (...) {
-            if (!registered) {
-                FreeLibrary(module);
-            }
-
-            std::cerr << "Plugin initialization failed "
-                "with an unknown exception.\n";
+            plugins_.pop_back();
+            throw;
         }
+
+        std::cout << "Loaded function: "
+                  << name << '\n';
+    }
+    catch (const std::exception& e) {
+        if (!registered) {
+            FreeLibrary(module);
+        }
+
+        std::cerr << "Plugin initialization failed: "
+                  << e.what() << '\n';
+    }
+    catch (...) {
+        if (!registered) {
+            FreeLibrary(module);
+        }
+
+        std::cerr << "Plugin initialization failed "
+                     "with an unknown exception.\n";
     }
 }
 
@@ -192,8 +196,6 @@ double PluginLoader::call(
         );
     }
 
-    // Исключения математических функций обрабатываются
-    // в main.cpp.
     return it->second(argument);
 }
 
